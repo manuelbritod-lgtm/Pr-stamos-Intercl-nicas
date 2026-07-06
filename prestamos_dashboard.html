@@ -786,38 +786,44 @@ async function cloudPublish(){
   document.getElementById('btn-publish').disabled=true;
   document.getElementById('cloud-status-text').textContent='Publicando...';
   try{
+    const myChanges=computeChanges(); // solo delta vs INITIAL_DATA (payload pequeño)
     let binId=cloudCfg.binId;
+    let payload=myChanges;
     if(binId){
-      // Paso 1: leer el estado actual de la nube para no perder cambios concurrentes
+      // Leer nube primero para no pisar cambios concurrentes de otros usuarios
       try{
         const cr=await fetch('https://api.jsonbin.io/v3/b/'+binId+'/latest',{headers:{'X-Master-Key':cloudCfg.masterKey}});
         if(cr.ok){
           const cd=await cr.json();
-          const raw=cd.record;
-          const cloudRecs=Array.isArray(raw.records)?raw.records:applyChanges(raw);
-          // Agregar registros que están en la nube pero no tenemos localmente
-          const localIds=new Set(records.map(x=>x.id));
-          const concurrentes=cloudRecs.filter(x=>!localIds.has(x.id));
-          if(concurrentes.length>0){
-            records=[...records,...concurrentes];
+          const cloudCh=cd.record||{};
+          // Combinar: registros nuevos de la nube que yo no tengo + los míos
+          const myNewIds=new Set(myChanges.newRecords.map(r=>r.id));
+          const cloudExtra=(cloudCh.newRecords||[]).filter(r=>!myNewIds.has(r.id));
+          payload={
+            newRecords:[...cloudExtra,...myChanges.newRecords],
+            updatedRecords:{...(cloudCh.updatedRecords||{}),...myChanges.updatedRecords},
+            deletedIds:[...new Set([...(cloudCh.deletedIds||[]),...myChanges.deletedIds])],
+            updated:new Date().toISOString()
+          };
+          // Si la nube tenía registros extra, incorporarlos localmente
+          if(cloudExtra.length>0){
+            records=applyChanges(payload);
             await store.set('prestamos-cpm-v4',records);
             renderDashboard();applyFilter();
           }
         }
-      }catch(e){console.warn('Pre-publish fetch failed, usando datos locales:',e);}
-      // Paso 2: publicar el array completo (evita problemas de merge parcial)
+      }catch(e){console.warn('Pre-publish merge failed, usando datos locales:',e);}
       const r=await fetch('https://api.jsonbin.io/v3/b/'+binId,{
         method:'PUT',
         headers:{'Content-Type':'application/json','X-Master-Key':cloudCfg.masterKey},
-        body:JSON.stringify({records:records,updated:new Date().toISOString()})
+        body:JSON.stringify(payload)
       });
       if(!r.ok)throw new Error('HTTP '+r.status);
     }else{
-      // Crear bin nuevo con array completo
       const r=await fetch('https://api.jsonbin.io/v3/b',{
         method:'POST',
         headers:{'Content-Type':'application/json','X-Master-Key':cloudCfg.masterKey,'X-Bin-Name':'prestamos-cpm','X-Bin-Private':'true'},
-        body:JSON.stringify({records:records,updated:new Date().toISOString()})
+        body:JSON.stringify(payload)
       });
       if(!r.ok)throw new Error('HTTP '+r.status+' — verifica tu Master Key');
       const d=await r.json();
